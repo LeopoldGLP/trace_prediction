@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 from pyts.decomposition import SingularSpectrumAnalysis
-from pyedmd import EDDM
+from PyEMD import EMD
 import tensorflow as tf
 from tensorflow.keras import layers
 
@@ -14,13 +14,13 @@ trajectory_df = pd.DataFrame(data, columns=columns)
 
 # 对经度纬度进行SSA处理
 def ssa_processing(data):
-    ssa = SingularSpectrumAnalysis(window_size=10, n_components=2)
+    ssa = SingularSpectrumAnalysis(window_size=5)
     ssa_components = ssa.fit_transform(data)
     return ssa_components
 
 # 对其他四个特征进行EDA处理
 def eda_processing(data):
-    eda = EDDM(r=2, n_neighbors=10, threshold=0.1)
+    eda = EMD(r=2, n_neighbors=10, threshold=0.1)
     eda_components = eda.fit_transform(data)
     return eda_components
 
@@ -38,8 +38,8 @@ test_features = test_data[['longitude', 'latitude', 'altitude', 'airspeed', 'ver
 test_target = test_data[['longitude', 'latitude']].values
 
 # 对特征进行SSA处理
-ssa_features = np.hstack([ssa_processing(train_features[:, :2]), eda_processing(train_features[:, 2:])])
-ssa_test_features = np.hstack([ssa_processing(test_features[:, :2]), eda_processing(test_features[:, 2:])])
+# ssa_features = np.hstack([ssa_processing(train_features[:, :2]), eda_processing(train_features[:, 2:])])
+# ssa_test_features = np.hstack([ssa_processing(test_features[:, :2]), eda_processing(test_features[:, 2:])])
 
 # 建立Informer模型
 class MultiHeadSelfAttention(layers.Layer):
@@ -71,21 +71,25 @@ class MultiHeadSelfAttention(layers.Layer):
         key = tf.reshape(key, (batch_size, -1, self.num_heads, self.head_dim))
         value = tf.reshape(value, (batch_size, -1, self.num_heads, self.head_dim))
 
+        # Transpose to align dimensions for multiplication
+        query = tf.transpose(query, perm=[0, 2, 1, 3])
+        key = tf.transpose(key, perm=[0, 2, 3, 1])
+        value = tf.transpose(value, perm=[0, 2, 3, 1])
+
         # Scaled dot-product attention
-        scaled_attention_logits = tf.einsum("ijkd,ijld->ijlk", query, key) / tf.math.sqrt(
+        scaled_attention_logits = tf.einsum("ijkl,ijlm->ijkm", query, key) / tf.math.sqrt(
             tf.cast(self.head_dim, tf.float32)
         )
         if mask is not None:
             scaled_attention_logits += mask * -1e9
 
         attention_weights = tf.nn.softmax(scaled_attention_logits, axis=-1)
-        output = tf.einsum("ijlk,ijkl->ijkd", attention_weights, value)
+        output = tf.einsum("ijkm,ijml->ijkl", attention_weights, value)
 
         # Reshape and concatenate the heads
         output = tf.reshape(output, (batch_size, -1, self.embed_dim))
         output = self.dense(output)
         return output
-
 class FeedForwardNetwork(layers.Layer):
     def __init__(self, embed_dim, ff_dim):
         super(FeedForwardNetwork, self).__init__()
@@ -135,7 +139,8 @@ class Informer(tf.keras.Model):
         self.final_layer = layers.Dense(1)
 
     def call(self, inputs, training=True):
-        mask = tf.math.reduce_any(tf.math.not_equal(inputs, 0), axis=-1, keepdims=True)
+        # mask = tf.math.reduce_any(tf.math.not_equal(inputs, 0), axis=-1, keepdims=True)
+        mask = tf.cast(tf.math.reduce_any(tf.math.not_equal(inputs, 0), axis=-1, keepdims=True), dtype=tf.float32)
 
         for i in range(self.num_blocks):
             inputs = self.blocks[i](inputs, training, mask)
@@ -164,7 +169,7 @@ optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
 informer_model.compile(optimizer=optimizer, loss='mean_squared_error')
 
 # 训练模型
-informer_model.fit(ssa_features, train_target, epochs=10, batch_size=32, validation_split=0.2)
+informer_model.fit(train_features, train_target, epochs=10, batch_size=32, validation_split=0.2)
 
 # 在测试集上进行预测
-predictions = informer_model.predict(ssa_test_features)
+predictions = informer_model.predict(test_features)
